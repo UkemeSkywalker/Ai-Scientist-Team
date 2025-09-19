@@ -1,0 +1,1 @@
+# AI Scientist Team - Multi-agent research system
