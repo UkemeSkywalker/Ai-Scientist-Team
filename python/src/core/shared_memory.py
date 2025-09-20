@@ -418,3 +418,38 @@ class SharedMemory:
             validation_results['errors'].append(f"Session validation failed: {e}")
         
         return validation_results
+    
+    def update_context(self, session_id: str, context_update: Dict[str, Any]) -> None:
+        """Update context for a session with Strands integration"""
+        for key, value in context_update.items():
+            self.write(session_id, key, value)
+        
+        logger.debug(f"Updated context for session {session_id} with keys: {list(context_update.keys())}")
+    
+    def get_strands_context(self, session_id: str) -> Dict[str, Any]:
+        """Get context formatted for Strands agent consumption"""
+        context = self.get_context(session_id)
+        
+        # Extract just the data portion for Strands agents
+        strands_context = {}
+        for key, file_data in context.items():
+            if isinstance(file_data, dict) and 'data' in file_data:
+                strands_context[key] = file_data['data']
+            else:
+                strands_context[key] = file_data
+        
+        return strands_context
+    
+    def store_strands_conversation(self, session_id: str, conversation_history: List[Dict[str, Any]]) -> None:
+        """Store Strands agent conversation history"""
+        self.write(session_id, "strands_conversation", {
+            "messages": conversation_history,
+            "message_count": len(conversation_history)
+        })
+    
+    def get_strands_conversation(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get Strands agent conversation history"""
+        conversation_data = self.read(session_id, "strands_conversation")
+        if conversation_data and isinstance(conversation_data, dict):
+            return conversation_data.get("messages", [])
+        return []
