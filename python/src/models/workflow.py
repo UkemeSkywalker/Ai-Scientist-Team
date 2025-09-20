@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from pydantic import BaseModel, Field
 
 
@@ -33,6 +33,35 @@ class AgentStatus(BaseModel):
     error: Optional[str] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
+
+
+class ResearchContext(BaseModel):
+    """Comprehensive research context that contains all agent outputs."""
+    session_id: str
+    query: str
+    timestamp: datetime = Field(default_factory=datetime.now)
+    status: WorkflowStatusType = WorkflowStatusType.IDLE
+    current_agent: Optional[AgentType] = None
+    version: int = 1
+    
+    # Agent outputs - imported from respective models
+    research_findings: Optional[Any] = None  # ResearchFindings
+    data_context: Optional[Any] = None       # DataContext  
+    experiment_results: Optional[Any] = None # ExperimentResults
+    critical_evaluation: Optional[Any] = None # CriticalEvaluation
+    visualization_results: Optional[Any] = None # VisualizationResults
+    
+    # Metadata
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+    tags: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    class Config:
+        use_enum_values = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 
 class WorkflowState(BaseModel):

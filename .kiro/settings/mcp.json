@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "Ref": {
+      "command": "npx",
+      "args": [
+        "ref-tools-mcp@latest"
+      ],
+      "env": {
+        "REF_API_KEY": "ref-3f6e9023a4a78f487734"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "ref_search_documentation",
+        "ref_read_url"
+      ]
+    },
+    "strands-agents": {
+      "command": "uvx",
+      "args": ["strands-agents-mcp-server"],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "INFO"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "search_docs",
+        "fetch_doc"
+      ]
+    }
+  }
+}
