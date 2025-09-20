@@ -1,0 +1,53 @@
+{
+  "test_summary": {
+    "total_tests": 7,
+    "passed_tests": 6,
+    "failed_tests": 1,
+    "success_rate": 85.71428571428571,
+    "test_query": "AI ethics"
+  },
+  "detailed_results": [
+    {
+      "test": "arXiv Search Tool",
+      "success": true,
+      "details": "Found 5 papers",
+      "timestamp": "2025-09-21T00:09:44.316580"
+    },
+    {
+      "test": "PubMed Search Tool",
+      "success": true,
+      "details": "Found 5 papers",
+      "timestamp": "2025-09-21T00:09:46.105858"
+    },
+    {
+      "test": "Hypothesis Generation Tool",
+      "success": true,
+      "details": "Generated 6 hypotheses",
+      "timestamp": "2025-09-21T00:09:46.106784"
+    },
+    {
+      "test": "Literature Analysis Tool",
+      "success": true,
+      "details": "Analyzed 2 papers",
+      "timestamp": "2025-09-21T00:09:46.107338"
+    },
+    {
+      "test": "Research Synthesis Tool",
+      "success": true,
+      "details": "Synthesis completed with confidence: 0.78",
+      "timestamp": "2025-09-21T00:09:46.107877"
+    },
+    {
+      "test": "Research Agent Execution",
+      "success": true,
+      "details": "Execution completed with high quality",
+      "timestamp": "2025-09-21T00:12:03.628510"
+    },
+    {
+      "test": "Shared Memory Integration",
+      "success": false,
+      "details": "Data integrity issue",
+      "timestamp": "2025-09-21T00:12:03.629065"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "test_summary": {
+    "total_tests": 8,
+    "passed_tests": 7,
+    "failed_tests": 1,
+    "success_rate": 87.5,
+    "test_query": "AI ethics"
+  },
+  "detailed_results": [
+    {
+      "test": "arXiv Search Tool",
+      "success": true,
+      "details": "Found 3 papers",
+      "timestamp": "2025-09-21T00:36:12.178254"
+    },
+    {
+      "test": "PubMed Search Tool",
+      "success": true,
+      "details": "Found 3 papers",
+      "timestamp": "2025-09-21T00:36:13.765147"
+    },
+    {
+      "test": "Hypothesis Generation Tool",
+      "success": true,
+      "details": "Generated 4 hypotheses",
+      "timestamp": "2025-09-21T00:36:13.766050"
+    },
+    {
+      "test": "Literature Analysis Tool",
+      "success": true,
+      "details": "Analyzed 2 papers",
+      "timestamp": "2025-09-21T00:36:13.766465"
+    },
+    {
+      "test": "Research Synthesis Tool",
+      "success": true,
+      "details": "Synthesis completed with confidence: 0.78",
+      "timestamp": "2025-09-21T00:36:13.766822"
+    },
+    {
+      "test": "Research Agent Execution",
+      "success": true,
+      "details": "Execution completed with high quality. Found 10 references (5 key references). Generated bibliography with 10 paper links.",
+      "timestamp": "2025-09-21T00:36:16.130588"
+    },
+    {
+      "test": "Shared Memory Integration",
+      "success": false,
+      "details": "Research status retrieval failed",
+      "timestamp": "2025-09-21T00:36:16.132513"
+    },
+    {
+      "test": "Reference Functionality",
+      "success": true,
+      "details": "Generated bibliographies in 3 formats and extracted 2 paper links",
+      "timestamp": "2025-09-21T00:36:16.132569"
+    }
+  ]
+}

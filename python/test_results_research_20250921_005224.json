@@ -1,0 +1,59 @@
+{
+  "test_summary": {
+    "total_tests": 8,
+    "passed_tests": 8,
+    "failed_tests": 0,
+    "success_rate": 100.0,
+    "test_query": "neural networks"
+  },
+  "detailed_results": [
+    {
+      "test": "arXiv Search Tool",
+      "success": true,
+      "details": "Found 3 papers",
+      "timestamp": "2025-09-21T00:52:19.829110"
+    },
+    {
+      "test": "PubMed Search Tool",
+      "success": true,
+      "details": "Found 3 papers",
+      "timestamp": "2025-09-21T00:52:21.386944"
+    },
+    {
+      "test": "Hypothesis Generation Tool",
+      "success": true,
+      "details": "Generated 4 hypotheses",
+      "timestamp": "2025-09-21T00:52:21.387176"
+    },
+    {
+      "test": "Literature Analysis Tool",
+      "success": true,
+      "details": "Analyzed 2 papers",
+      "timestamp": "2025-09-21T00:52:21.387378"
+    },
+    {
+      "test": "Research Synthesis Tool",
+      "success": true,
+      "details": "Synthesis completed with confidence: 0.78",
+      "timestamp": "2025-09-21T00:52:21.387590"
+    },
+    {
+      "test": "Research Agent Execution",
+      "success": true,
+      "details": "Execution completed with high quality. Found 10 references (5 key references). Generated bibliography with 10 paper links.",
+      "timestamp": "2025-09-21T00:52:24.595187"
+    },
+    {
+      "test": "Shared Memory Integration",
+      "success": true,
+      "details": "All memory operations successful",
+      "timestamp": "2025-09-21T00:52:24.596914"
+    },
+    {
+      "test": "Reference Functionality",
+      "success": true,
+      "details": "Generated bibliographies in 3 formats and extracted 2 paper links",
+      "timestamp": "2025-09-21T00:52:24.596959"
+    }
+  ]
+}
