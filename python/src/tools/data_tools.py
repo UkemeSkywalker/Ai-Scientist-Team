@@ -1,6 +1,7 @@
 """
 Data collection tools for the Strands Data Agent
 Implements Kaggle, HuggingFace, AWS Open Data search, data cleaning, and S3 storage
+Enhanced with category-based organization and intelligent dataset discovery
 """
 
 import json
@@ -10,13 +11,15 @@ import numpy as np
 import boto3
 import io
 import os
-from typing import List, Dict, Any, Optional, Tuple
+import re
+from typing import List, Dict, Any, Optional, Tuple, Set
 from datetime import datetime
 import structlog
 from urllib.parse import quote_plus
 import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
+from collections import defaultdict
 
 # Load environment variables
 load_dotenv()
@@ -32,6 +35,58 @@ from ..models.data import DatasetMetadata, DataQualityMetrics, PreprocessingStep
 
 logger = structlog.get_logger(__name__)
 
+# Research category mappings for intelligent dataset organization
+RESEARCH_CATEGORIES = {
+    "machine-learning": [
+        "machine learning", "ml", "neural network", "deep learning", "classification", 
+        "regression", "clustering", "supervised", "unsupervised", "reinforcement learning",
+        "feature engineering", "model training", "prediction", "algorithm"
+    ],
+    "natural-language-processing": [
+        "nlp", "natural language", "text analysis", "sentiment", "language model",
+        "tokenization", "named entity", "text classification", "translation", "chatbot",
+        "text mining", "linguistic", "corpus", "embedding", "transformer"
+    ],
+    "computer-vision": [
+        "computer vision", "image", "visual", "object detection", "face recognition",
+        "image classification", "segmentation", "opencv", "cnn", "convolutional",
+        "image processing", "pattern recognition", "feature extraction"
+    ],
+    "data-science": [
+        "data science", "analytics", "statistics", "exploratory data", "visualization",
+        "pandas", "numpy", "matplotlib", "seaborn", "jupyter", "analysis", "insights",
+        "business intelligence", "data mining", "statistical analysis"
+    ],
+    "healthcare": [
+        "medical", "health", "clinical", "patient", "diagnosis", "treatment", "drug",
+        "disease", "hospital", "healthcare", "biomedical", "pharmaceutical", "genomics",
+        "epidemiology", "medical imaging", "electronic health records"
+    ],
+    "finance": [
+        "financial", "stock", "trading", "investment", "banking", "credit", "fraud",
+        "risk", "portfolio", "market", "economic", "cryptocurrency", "fintech",
+        "algorithmic trading", "quantitative finance", "financial modeling"
+    ],
+    "climate-science": [
+        "climate", "weather", "temperature", "environmental", "carbon", "emission",
+        "renewable energy", "sustainability", "global warming", "meteorology",
+        "atmospheric", "oceanography", "ecology", "green technology"
+    ],
+    "social-media": [
+        "social media", "twitter", "facebook", "instagram", "social network",
+        "user behavior", "engagement", "viral", "influence", "community",
+        "social analytics", "online behavior", "digital marketing"
+    ],
+    "transportation": [
+        "transportation", "traffic", "vehicle", "autonomous", "logistics", "mobility",
+        "route optimization", "public transport", "aviation", "maritime", "supply chain"
+    ],
+    "education": [
+        "education", "learning", "student", "academic", "university", "school",
+        "curriculum", "assessment", "educational technology", "e-learning", "mooc"
+    ]
+}
+
 # Tool decorator - use strands.tool if available, otherwise create a simple wrapper
 def tool_decorator(func):
     """Decorator for Strands tools with fallback"""
@@ -41,6 +96,218 @@ def tool_decorator(func):
         # Simple fallback decorator that preserves function metadata
         func._is_strands_tool = True
         return func
+
+def categorize_query(query: str) -> Tuple[str, float]:
+    """
+    Categorize a research query into predefined research categories.
+    
+    Args:
+        query: Research query string
+        
+    Returns:
+        Tuple of (category_name, confidence_score)
+    """
+    query_lower = query.lower()
+    category_scores = {}
+    
+    for category, keywords in RESEARCH_CATEGORIES.items():
+        score = 0
+        query_words = set(query_lower.split())
+        
+        for keyword in keywords:
+            keyword_words = set(keyword.lower().split())
+            # Exact phrase match gets higher score
+            if keyword in query_lower:
+                score += 2.0
+            # Word overlap gets partial score
+            overlap = len(query_words.intersection(keyword_words))
+            if overlap > 0:
+                score += overlap / len(keyword_words)
+        
+        category_scores[category] = score
+    
+    if not category_scores or max(category_scores.values()) == 0:
+        return "general", 0.1
+    
+    best_category = max(category_scores, key=category_scores.get)
+    confidence = min(1.0, category_scores[best_category] / 5.0)  # Normalize to 0-1
+    
+    return best_category, confidence
+
+@tool_decorator
+def check_existing_datasets_tool(query: str, bucket_name: str = None) -> str:
+    """
+    Check existing datasets in S3 bucket organized by categories to find reusable data.
+    
+    Args:
+        query: Research query to categorize and search for existing datasets
+        bucket_name: S3 bucket name (optional, will use default if not provided)
+        
+    Returns:
+        JSON string containing existing datasets information
+    """
+    logger.info("Checking existing datasets", query=query, bucket_name=bucket_name)
+    
+    try:
+        # Categorize the query
+        category, confidence = categorize_query(query)
+        
+        # Use default bucket if not provided
+        if not bucket_name:
+            bucket_name = os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data")
+        
+        try:
+            s3_client = boto3.client('s3')
+            
+            # List objects in the category folder
+            category_prefix = f"datasets/{category}/"
+            
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=category_prefix,
+                MaxKeys=100
+            )
+            
+            existing_datasets = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    # Skip folder markers
+                    if obj['Key'].endswith('/'):
+                        continue
+                    
+                    # Get object metadata
+                    try:
+                        head_response = s3_client.head_object(
+                            Bucket=bucket_name,
+                            Key=obj['Key']
+                        )
+                        
+                        metadata = head_response.get('Metadata', {})
+                        
+                        dataset_info = {
+                            "s3_key": obj['Key'],
+                            "size_bytes": obj['Size'],
+                            "last_modified": obj['LastModified'].isoformat(),
+                            "dataset_name": metadata.get('original_dataset', 'Unknown'),
+                            "source": metadata.get('source', 'Unknown'),
+                            "quality_score": float(metadata.get('quality_score', 0)),
+                            "original_rows": int(metadata.get('original_rows', 0)),
+                            "cleaned_rows": int(metadata.get('cleaned_rows', 0)),
+                            "category": category
+                        }
+                        existing_datasets.append(dataset_info)
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to get metadata for {obj['Key']}: {str(e)}")
+                        continue
+            
+            # Also check related categories for broader search
+            related_datasets = []
+            if confidence < 0.7:  # If categorization is uncertain, check other categories
+                for other_category in RESEARCH_CATEGORIES.keys():
+                    if other_category != category:
+                        other_prefix = f"datasets/{other_category}/"
+                        try:
+                            other_response = s3_client.list_objects_v2(
+                                Bucket=bucket_name,
+                                Prefix=other_prefix,
+                                MaxKeys=20  # Limit for related searches
+                            )
+                            
+                            if 'Contents' in other_response:
+                                for obj in other_response['Contents'][:5]:  # Top 5 from each category
+                                    if obj['Key'].endswith('/'):
+                                        continue
+                                    
+                                    try:
+                                        head_response = s3_client.head_object(
+                                            Bucket=bucket_name,
+                                            Key=obj['Key']
+                                        )
+                                        metadata = head_response.get('Metadata', {})
+                                        
+                                        # Check if dataset name or source matches query keywords
+                                        dataset_name = metadata.get('original_dataset', '').lower()
+                                        query_words = query.lower().split()
+                                        
+                                        relevance = sum(1 for word in query_words if word in dataset_name)
+                                        if relevance > 0:
+                                            dataset_info = {
+                                                "s3_key": obj['Key'],
+                                                "size_bytes": obj['Size'],
+                                                "last_modified": obj['LastModified'].isoformat(),
+                                                "dataset_name": metadata.get('original_dataset', 'Unknown'),
+                                                "source": metadata.get('source', 'Unknown'),
+                                                "quality_score": float(metadata.get('quality_score', 0)),
+                                                "category": other_category,
+                                                "relevance_score": relevance / len(query_words)
+                                            }
+                                            related_datasets.append(dataset_info)
+                                    except:
+                                        continue
+                        except:
+                            continue
+            
+            # Sort datasets by quality score and recency
+            existing_datasets.sort(key=lambda x: (x['quality_score'], x['last_modified']), reverse=True)
+            related_datasets.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+            
+            result = {
+                "query": query,
+                "primary_category": category,
+                "category_confidence": round(confidence, 2),
+                "bucket_name": bucket_name,
+                "existing_datasets": {
+                    "primary_category": existing_datasets[:10],  # Top 10 from primary category
+                    "related_categories": related_datasets[:5]   # Top 5 from related categories
+                },
+                "summary": {
+                    "total_primary": len(existing_datasets),
+                    "total_related": len(related_datasets),
+                    "recommendation": "reuse_existing" if existing_datasets else "download_new"
+                },
+                "status": "success"
+            }
+            
+            logger.info("Existing datasets check completed", 
+                       category=category,
+                       primary_found=len(existing_datasets),
+                       related_found=len(related_datasets))
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as s3_error:
+            # Simulate response for testing when S3 is not available
+            logger.warning(f"S3 access failed, simulating response: {str(s3_error)}")
+            
+            result = {
+                "query": query,
+                "primary_category": category,
+                "category_confidence": round(confidence, 2),
+                "bucket_name": bucket_name,
+                "existing_datasets": {
+                    "primary_category": [],
+                    "related_categories": []
+                },
+                "summary": {
+                    "total_primary": 0,
+                    "total_related": 0,
+                    "recommendation": "download_new"
+                },
+                "status": "simulated_success",
+                "note": "S3 access simulated - in production, would check actual bucket contents"
+            }
+            
+            return json.dumps(result, indent=2)
+            
+    except Exception as e:
+        error_msg = f"Dataset check error: {str(e)}"
+        logger.error("Dataset check failed", error=error_msg)
+        return json.dumps({
+            "query": query,
+            "error": error_msg,
+            "status": "error"
+        })
 
 @tool_decorator
 def kaggle_search_tool(query: str, max_results: int = 10) -> str:
@@ -509,19 +776,20 @@ def _clean_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     return df_cleaned, preprocessing_steps
 
 @tool_decorator
-def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, bucket_name: str = None) -> str:
+def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, query: str = "", bucket_name: str = None) -> str:
     """
-    Store processed dataset in Amazon S3 with metadata.
+    Store processed dataset in Amazon S3 with category-based organization.
     
     Args:
         dataset_info: JSON string containing original dataset information
         cleaned_data_summary: JSON string containing cleaned data summary
+        query: Original research query for categorization
         bucket_name: S3 bucket name (optional, will use default if not provided)
         
     Returns:
         JSON string containing S3 storage results
     """
-    logger.info("S3 storage initiated", bucket_name=bucket_name)
+    logger.info("S3 storage initiated", bucket_name=bucket_name, query=query)
     
     try:
         # Parse input data
@@ -538,15 +806,26 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, bucket_name: s
         if not bucket_name:
             bucket_name = os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data")
         
-        # Generate S3 key
-        dataset_name = dataset_data.get("name", "unknown_dataset")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        s3_key = f"datasets/{dataset_name}/{timestamp}/processed_data.json"
+        # Categorize based on query or dataset info
+        if query:
+            category, confidence = categorize_query(query)
+        else:
+            # Try to categorize based on dataset name/description
+            dataset_text = f"{dataset_data.get('name', '')} {dataset_data.get('description', '')}"
+            category, confidence = categorize_query(dataset_text)
         
-        # Create metadata
+        # Generate category-based S3 key
+        dataset_name = dataset_data.get("name", "unknown_dataset").replace("/", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        s3_key = f"datasets/{category}/{dataset_name}/{timestamp}/processed_data.json"
+        
+        # Create enhanced metadata with category information
         metadata = {
             "original_dataset": dataset_data.get("name", ""),
             "source": dataset_data.get("source", ""),
+            "category": category,
+            "category_confidence": str(round(confidence, 2)),
+            "research_query": query[:100] if query else "",  # Truncate for metadata limits
             "processing_timestamp": datetime.now().isoformat(),
             "original_rows": str(cleaning_data.get("original_shape", {}).get("rows", 0)),
             "cleaned_rows": str(cleaning_data.get("cleaned_shape", {}).get("rows", 0)),
@@ -558,17 +837,25 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, bucket_name: s
         try:
             s3_client = boto3.client('s3')
             
-            # Create a minimal sample file to avoid Strands response truncation
+            # Create enhanced sample file with category information
             sample_data = {
                 "dataset_name": dataset_data.get("name", ""),
                 "source": dataset_data.get("source", ""),
+                "category": category,
+                "category_confidence": round(confidence, 2),
+                "research_query": query,
                 "processing_summary": {
                     "original_rows": cleaning_data.get("original_shape", {}).get("rows", 0),
                     "cleaned_rows": cleaning_data.get("cleaned_shape", {}).get("rows", 0),
                     "quality_score": cleaning_data.get("quality_metrics", {}).get("overall_score", 0)
                 },
+                "s3_organization": {
+                    "category_path": f"datasets/{category}/",
+                    "full_path": s3_key,
+                    "reusable": True
+                },
                 "timestamp": datetime.now().isoformat(),
-                "note": "Processed dataset metadata stored in S3"
+                "note": "Processed dataset metadata stored in S3 with category-based organization"
             }
             
             # Convert to JSON and upload
@@ -586,14 +873,22 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, bucket_name: s
             # Get object info
             response = s3_client.head_object(Bucket=bucket_name, Key=s3_key)
             
-            # Return minimal response to avoid Strands truncation
+            # Return enhanced response with category information
             result = {
                 "dataset_name": dataset_name,
+                "category": category,
+                "category_confidence": round(confidence, 2),
                 "s3_location": {
                     "bucket": bucket_name,
                     "key": s3_key,
+                    "category_path": f"datasets/{category}/",
                     "region": os.getenv("AWS_REGION", "us-east-1"),
                     "size_bytes": response.get('ContentLength', 0)
+                },
+                "reusability": {
+                    "organized_by_category": True,
+                    "discoverable": True,
+                    "category_keywords": RESEARCH_CATEGORIES.get(category, [])[:5]
                 },
                 "status": "success"
             }
@@ -616,14 +911,22 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, bucket_name: s
                 "note": "This is a sample file. In production, the actual processed dataset would be stored here."
             }
             
-            # Return minimal response to avoid Strands truncation
+            # Return enhanced simulated response
             result = {
                 "dataset_name": dataset_name,
+                "category": category,
+                "category_confidence": round(confidence, 2),
                 "s3_location": {
                     "bucket": bucket_name,
                     "key": s3_key,
+                    "category_path": f"datasets/{category}/",
                     "region": os.getenv("AWS_REGION", "us-east-1"),
                     "size_bytes": len(json.dumps(sample_data).encode('utf-8'))
+                },
+                "reusability": {
+                    "organized_by_category": True,
+                    "discoverable": True,
+                    "category_keywords": RESEARCH_CATEGORIES.get(category, [])[:5]
                 },
                 "status": "simulated_success"
             }
@@ -638,8 +941,320 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, bucket_name: s
             "status": "error"
         })
 
+@tool_decorator
+def smart_dataset_discovery_tool(query: str, bucket_name: str = None, max_new_datasets: int = 5) -> str:
+    """
+    Intelligent dataset discovery that checks existing datasets first, then searches for new ones if needed.
+    
+    Args:
+        query: Research query
+        bucket_name: S3 bucket name (optional)
+        max_new_datasets: Maximum number of new datasets to search for
+        
+    Returns:
+        JSON string containing comprehensive dataset recommendations
+    """
+    logger.info("Smart dataset discovery initiated", query=query, max_new_datasets=max_new_datasets)
+    
+    try:
+        # Step 1: Check existing datasets
+        existing_check = check_existing_datasets_tool(query, bucket_name)
+        existing_data = json.loads(existing_check)
+        
+        category = existing_data.get("primary_category", "general")
+        existing_primary = existing_data.get("existing_datasets", {}).get("primary_category", [])
+        existing_related = existing_data.get("existing_datasets", {}).get("related_categories", [])
+        
+        # Step 2: Determine if we need new datasets
+        need_new_datasets = len(existing_primary) < 2  # Need at least 2 good datasets
+        
+        new_datasets = {"kaggle": [], "huggingface": []}
+        
+        if need_new_datasets:
+            # Search Kaggle
+            try:
+                kaggle_results = kaggle_search_tool(query, max_new_datasets)
+                kaggle_data = json.loads(kaggle_results)
+                if kaggle_data.get("status") == "success":
+                    new_datasets["kaggle"] = kaggle_data.get("datasets", [])[:max_new_datasets]
+            except Exception as e:
+                logger.warning(f"Kaggle search failed: {str(e)}")
+            
+            # Search HuggingFace
+            try:
+                hf_results = huggingface_search_tool(query, max_new_datasets)
+                hf_data = json.loads(hf_results)
+                if hf_data.get("status") == "success":
+                    new_datasets["huggingface"] = hf_data.get("datasets", [])[:max_new_datasets]
+            except Exception as e:
+                logger.warning(f"HuggingFace search failed: {str(e)}")
+        
+        # Step 3: Create recommendations
+        recommendations = []
+        
+        # Prioritize existing high-quality datasets
+        for dataset in existing_primary[:3]:  # Top 3 existing
+            if dataset.get("quality_score", 0) > 0.7:
+                recommendations.append({
+                    "type": "existing",
+                    "priority": "high",
+                    "reason": "High-quality existing dataset in same category",
+                    "dataset": dataset,
+                    "action": "reuse"
+                })
+        
+        # Add related datasets if primary category is sparse
+        if len(existing_primary) < 2:
+            for dataset in existing_related[:2]:  # Top 2 related
+                recommendations.append({
+                    "type": "existing",
+                    "priority": "medium",
+                    "reason": "Related dataset from different category",
+                    "dataset": dataset,
+                    "action": "reuse"
+                })
+        
+        # Add new datasets if needed
+        if need_new_datasets:
+            # Prioritize Kaggle datasets (usually higher quality)
+            for dataset in new_datasets["kaggle"][:2]:
+                if dataset.get("relevance_score", 0) > 0.3:
+                    recommendations.append({
+                        "type": "new",
+                        "priority": "high",
+                        "reason": "High-relevance new dataset from Kaggle",
+                        "dataset": dataset,
+                        "action": "download_and_store",
+                        "target_category": category
+                    })
+            
+            # Add HuggingFace datasets
+            for dataset in new_datasets["huggingface"][:2]:
+                if dataset.get("relevance_score", 0) > 0.3:
+                    recommendations.append({
+                        "type": "new",
+                        "priority": "medium",
+                        "reason": "Relevant new dataset from HuggingFace",
+                        "dataset": dataset,
+                        "action": "download_and_store",
+                        "target_category": category
+                    })
+        
+        # Step 4: Generate strategy
+        strategy = {
+            "primary_approach": "reuse_existing" if existing_primary else "download_new",
+            "category": category,
+            "existing_assets": len(existing_primary) + len(existing_related),
+            "new_sources_needed": len([r for r in recommendations if r["type"] == "new"]),
+            "estimated_coverage": min(100, (len(existing_primary) * 30) + (len(recommendations) * 20))
+        }
+        
+        result = {
+            "query": query,
+            "category": category,
+            "strategy": strategy,
+            "recommendations": recommendations[:8],  # Limit to top 8
+            "existing_summary": {
+                "primary_category_datasets": len(existing_primary),
+                "related_category_datasets": len(existing_related),
+                "reusable_high_quality": len([d for d in existing_primary if d.get("quality_score", 0) > 0.7])
+            },
+            "new_search_summary": {
+                "kaggle_found": len(new_datasets["kaggle"]),
+                "huggingface_found": len(new_datasets["huggingface"]),
+                "search_performed": need_new_datasets
+            },
+            "next_steps": [
+                "Review existing high-quality datasets first",
+                "Download and process recommended new datasets",
+                f"Store new datasets in '{category}' category for future reuse",
+                "Update dataset catalog with new acquisitions"
+            ],
+            "status": "success"
+        }
+        
+        logger.info("Smart dataset discovery completed", 
+                   category=category,
+                   recommendations=len(recommendations),
+                   existing_found=len(existing_primary),
+                   new_found=len(new_datasets["kaggle"]) + len(new_datasets["huggingface"]))
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        error_msg = f"Smart dataset discovery error: {str(e)}"
+        logger.error("Smart dataset discovery failed", error=error_msg)
+        return json.dumps({
+            "query": query,
+            "error": error_msg,
+            "status": "error"
+        })
+
+@tool_decorator
+def organize_dataset_categories_tool(bucket_name: str = None, dry_run: bool = True) -> str:
+    """
+    Organize existing datasets in S3 bucket into category-based structure.
+    
+    Args:
+        bucket_name: S3 bucket name (optional)
+        dry_run: If True, only simulate the reorganization
+        
+    Returns:
+        JSON string containing reorganization plan or results
+    """
+    logger.info("Dataset reorganization initiated", bucket_name=bucket_name, dry_run=dry_run)
+    
+    try:
+        if not bucket_name:
+            bucket_name = os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data")
+        
+        try:
+            s3_client = boto3.client('s3')
+            
+            # List all existing datasets
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix="datasets/",
+                MaxKeys=1000
+            )
+            
+            reorganization_plan = []
+            category_stats = defaultdict(int)
+            
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    if obj['Key'].endswith('/'):
+                        continue
+                    
+                    # Get current path structure
+                    path_parts = obj['Key'].split('/')
+                    if len(path_parts) < 3:
+                        continue
+                    
+                    current_structure = path_parts[1]  # Current folder name
+                    
+                    # Try to get metadata to understand dataset
+                    try:
+                        head_response = s3_client.head_object(
+                            Bucket=bucket_name,
+                            Key=obj['Key']
+                        )
+                        metadata = head_response.get('Metadata', {})
+                        
+                        # Determine appropriate category
+                        dataset_name = metadata.get('original_dataset', current_structure)
+                        dataset_text = f"{dataset_name} {metadata.get('source', '')}"
+                        
+                        suggested_category, confidence = categorize_query(dataset_text)
+                        
+                        # Check if reorganization is needed
+                        if current_structure != suggested_category:
+                            new_key = obj['Key'].replace(f"datasets/{current_structure}/", f"datasets/{suggested_category}/")
+                            
+                            reorganization_plan.append({
+                                "current_key": obj['Key'],
+                                "suggested_key": new_key,
+                                "current_category": current_structure,
+                                "suggested_category": suggested_category,
+                                "confidence": round(confidence, 2),
+                                "dataset_name": dataset_name,
+                                "size_bytes": obj['Size'],
+                                "action": "move" if not dry_run else "plan_move"
+                            })
+                        
+                        category_stats[suggested_category] += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to process {obj['Key']}: {str(e)}")
+                        continue
+            
+            # Execute moves if not dry run
+            moves_executed = 0
+            if not dry_run and reorganization_plan:
+                for plan in reorganization_plan[:10]:  # Limit to 10 moves per execution
+                    try:
+                        # Copy to new location
+                        copy_source = {'Bucket': bucket_name, 'Key': plan['current_key']}
+                        s3_client.copy_object(
+                            CopySource=copy_source,
+                            Bucket=bucket_name,
+                            Key=plan['suggested_key']
+                        )
+                        
+                        # Delete old location
+                        s3_client.delete_object(
+                            Bucket=bucket_name,
+                            Key=plan['current_key']
+                        )
+                        
+                        moves_executed += 1
+                        plan['status'] = 'completed'
+                        
+                    except Exception as e:
+                        plan['status'] = f'failed: {str(e)}'
+                        logger.error(f"Failed to move {plan['current_key']}: {str(e)}")
+            
+            result = {
+                "bucket_name": bucket_name,
+                "dry_run": dry_run,
+                "reorganization_plan": reorganization_plan[:20],  # Limit response size
+                "summary": {
+                    "total_datasets_analyzed": len(reorganization_plan) + sum(category_stats.values()) - len(reorganization_plan),
+                    "datasets_needing_reorganization": len(reorganization_plan),
+                    "moves_executed": moves_executed,
+                    "category_distribution": dict(category_stats)
+                },
+                "recommendations": [
+                    "Run with dry_run=False to execute the reorganization",
+                    "Monitor S3 costs during reorganization",
+                    "Update application code to use new category-based paths",
+                    "Consider implementing automated categorization for new uploads"
+                ],
+                "status": "success"
+            }
+            
+            logger.info("Dataset reorganization completed", 
+                       total_analyzed=len(reorganization_plan),
+                       moves_needed=len(reorganization_plan),
+                       moves_executed=moves_executed)
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as s3_error:
+            # Simulate response for testing
+            logger.warning(f"S3 access failed, simulating response: {str(s3_error)}")
+            
+            result = {
+                "bucket_name": bucket_name,
+                "dry_run": dry_run,
+                "reorganization_plan": [],
+                "summary": {
+                    "total_datasets_analyzed": 0,
+                    "datasets_needing_reorganization": 0,
+                    "moves_executed": 0,
+                    "category_distribution": {}
+                },
+                "status": "simulated_success",
+                "note": "S3 access simulated - in production, would analyze and reorganize actual datasets"
+            }
+            
+            return json.dumps(result, indent=2)
+            
+    except Exception as e:
+        error_msg = f"Dataset reorganization error: {str(e)}"
+        logger.error("Dataset reorganization failed", error=error_msg)
+        return json.dumps({
+            "bucket_name": bucket_name,
+            "error": error_msg,
+            "status": "error"
+        })
+
 # Export all tools for easy import
 __all__ = [
+    "categorize_query",
+    "check_existing_datasets_tool",
+    "smart_dataset_discovery_tool",
+    "organize_dataset_categories_tool",
     "kaggle_search_tool",
     "huggingface_search_tool",
     "data_cleaning_tool",

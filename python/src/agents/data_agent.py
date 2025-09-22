@@ -20,7 +20,10 @@ from ..tools.data_tools import (
     kaggle_search_tool,
     huggingface_search_tool,
     data_cleaning_tool,
-    s3_storage_tool
+    s3_storage_tool,
+    check_existing_datasets_tool,
+    smart_dataset_discovery_tool,
+    organize_dataset_categories_tool
 )
 from ..models.data import DataContext, DatasetMetadata, DataQualityMetrics, S3Location
 from ..core.shared_memory import SharedMemory
@@ -53,18 +56,21 @@ class DataAgent:
             # Import conversation manager for better token management
             from strands.agent.conversation_manager import SlidingWindowConversationManager
             
-            # Create Data Agent with specialized system prompt and tools
+            # Create Data Agent with specialized system prompt and enhanced tools
             self.agent = Agent(
                 model=strands_config.model_id,
                 system_prompt=self._get_system_prompt(),
                 tools=[
+                    check_existing_datasets_tool,
+                    smart_dataset_discovery_tool,
                     kaggle_search_tool,
                     huggingface_search_tool,
                     data_cleaning_tool,
-                    s3_storage_tool
+                    s3_storage_tool,
+                    organize_dataset_categories_tool
                 ],
                 name="Data Agent",
-                description="Specialized agent for dataset discovery, collection, cleaning, and storage",
+                description="Specialized agent for intelligent dataset discovery, collection, cleaning, and category-based storage",
                 agent_id="data_agent",
                 conversation_manager=SlidingWindowConversationManager(window_size=15, should_truncate_results=True)
             )
@@ -77,17 +83,32 @@ class DataAgent:
     
     def _get_system_prompt(self) -> str:
         """Get the system prompt for the Data Agent"""
-        return """You are a Data Agent specialized in dataset discovery, collection, cleaning, and storage.
+        return """You are an intelligent Data Agent specialized in smart dataset discovery, collection, cleaning, and category-based storage.
 
-Your tools work together in a specific sequence:
-1. kaggle_search_tool, huggingface_search_tool - search for relevant datasets
-2. data_cleaning_tool - analyze and assess quality of selected datasets (requires dataset_info as JSON)
-3. s3_storage_tool - store processed datasets in S3 (requires dataset_info and cleaned_data_summary as JSON)
+Your enhanced workflow prioritizes reusability and organization:
 
-IMPORTANT: Always pass the complete JSON output from one tool as input to the next tool that needs it.
-Each tool returns structured JSON data that must be used by subsequent tools.
+1. SMART DISCOVERY FIRST:
+   - Use smart_dataset_discovery_tool(query) to get comprehensive recommendations
+   - This tool automatically checks existing datasets and searches for new ones if needed
+   - Follow the recommendations to prioritize existing high-quality datasets
 
-Focus on finding high-quality, relevant datasets and ensure proper data cleaning and storage with comprehensive metadata."""
+2. ALTERNATIVE INDIVIDUAL TOOLS (if needed):
+   - check_existing_datasets_tool(query) - check what datasets we already have
+   - kaggle_search_tool, huggingface_search_tool - search for new datasets
+   - data_cleaning_tool - analyze and assess quality (requires dataset_info as JSON)
+   - s3_storage_tool - store with category organization (requires dataset_info, cleaned_data_summary, and query)
+
+3. ORGANIZATION TOOLS:
+   - organize_dataset_categories_tool - reorganize existing datasets by research categories
+
+KEY PRINCIPLES:
+- Always check existing datasets before downloading new ones
+- Store datasets in research categories (machine-learning, nlp, computer-vision, etc.)
+- Pass complete JSON outputs between tools
+- Prioritize reusability and avoid duplicate downloads
+- Focus on building a well-organized, discoverable dataset library
+
+The smart_dataset_discovery_tool is your primary tool - use it first for most queries."""
 
     async def execute_data_collection(self, query: str, session_id: str, research_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -145,119 +166,91 @@ Focus on finding high-quality, relevant datasets and ensure proper data cleaning
             return error_result
     
     async def _execute_strands_data_collection(self, query: str, session_id: str, research_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute data collection using Strands agent with proper data passing"""
-        logger.info("Executing data collection with Strands agent", query=query)
+        """Execute data collection using Strands agent with smart discovery workflow"""
+        logger.info("Executing smart data collection with Strands agent", query=query)
         
         try:
-            # Step 1: Search multiple data sources
-            logger.info("Strands agent searching Kaggle", query=query)
-            kaggle_result = self.agent.tool.kaggle_search_tool(query=query, max_results=8)
+            # Step 1: Use smart dataset discovery for comprehensive recommendations
+            logger.info("Strands agent performing smart dataset discovery", query=query)
+            smart_discovery_result = self.agent.tool.smart_dataset_discovery_tool(
+                query=query, 
+                max_new_datasets=5
+            )
             
-            logger.info("Strands agent searching HuggingFace", query=query)
-            huggingface_result = self.agent.tool.huggingface_search_tool(query=query, max_results=7)
-            
-            # Parse search results from Strands tool format
-            if isinstance(kaggle_result, dict) and 'content' in kaggle_result:
-                kaggle_data = json.loads(kaggle_result['content'][0]['text'])
+            # Parse smart discovery results
+            if isinstance(smart_discovery_result, dict) and 'content' in smart_discovery_result:
+                discovery_data = json.loads(smart_discovery_result['content'][0]['text'])
             else:
-                kaggle_data = json.loads(kaggle_result) if isinstance(kaggle_result, str) else kaggle_result
-                
-            if isinstance(huggingface_result, dict) and 'content' in huggingface_result:
-                huggingface_data = json.loads(huggingface_result['content'][0]['text'])
-            else:
-                huggingface_data = json.loads(huggingface_result) if isinstance(huggingface_result, str) else huggingface_result
+                discovery_data = json.loads(smart_discovery_result) if isinstance(smart_discovery_result, str) else smart_discovery_result
             
-            # Combine and select best datasets
-            all_datasets = []
-            if kaggle_data.get("datasets"):
-                all_datasets.extend(kaggle_data["datasets"])
-            if huggingface_data.get("datasets"):
-                all_datasets.extend(huggingface_data["datasets"])
+            # Extract recommendations
+            recommendations = discovery_data.get("recommendations", [])
+            category = discovery_data.get("category", "general")
             
-            # Sort by relevance and select top datasets
-            all_datasets.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-            selected_datasets = all_datasets[:10]  # Process top 8 datasets to reach target of 7+ processed
+            # Track all datasets found during the process
+            all_datasets_found = []
             
-            # Step 2: Clean and process selected datasets
+            # Step 2: Process recommendations (prioritize existing datasets)
             processed_datasets = []
             s3_locations = []
             
-            for dataset in selected_datasets:
+            # Process existing datasets first (high priority)
+            existing_datasets = [r for r in recommendations if r["type"] == "existing" and r["priority"] == "high"]
+            for rec in existing_datasets[:3]:  # Top 3 existing
+                dataset = rec["dataset"]
+                all_datasets_found.append(dataset)  # Track found dataset
                 try:
-                    logger.info("Cleaning dataset (direct call)", dataset_name=dataset.get("name"))
+                    # For existing datasets, we already have them processed, just reference them
+                    processed_dataset = {
+                        "original_dataset": dataset,
+                        "cleaning_results": {
+                            "dataset_name": dataset.get("dataset_name", "unknown"),
+                            "quality_metrics": {"overall_score": dataset.get("quality_score", 0.8)},
+                            "status": "existing_dataset"
+                        },
+                        "storage_results": {
+                            "dataset_name": dataset.get("dataset_name", "unknown"),
+                            "s3_location": {
+                                "bucket": os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data"),
+                                "key": dataset.get("s3_key", ""),
+                                "category_path": f"datasets/{category}/",
+                                "region": "us-east-1",
+                                "size_bytes": dataset.get("size_bytes", 0)
+                            },
+                            "status": "existing_dataset"
+                        }
+                    }
+                    processed_datasets.append(processed_dataset)
+                    s3_locations.append(processed_dataset["storage_results"]["s3_location"])
                     
-                    # Import the cleaning tool directly
+                except Exception as e:
+                    logger.warning(f"Failed to process existing dataset {dataset.get('dataset_name')}: {str(e)}")
+                    continue
+            
+            # Process new datasets if needed
+            new_datasets = [r for r in recommendations if r["type"] == "new"]
+            for rec in new_datasets[:4]:  # Top 4 new datasets
+                dataset = rec["dataset"]
+                all_datasets_found.append(dataset)  # Track found dataset
+                try:
+                    logger.info("Processing new dataset", dataset_name=dataset.get("name"))
+                    
+                    # Clean the dataset
                     from ..tools.data_tools import data_cleaning_tool
+                    cleaning_result_str = data_cleaning_tool(
+                        json.dumps(dataset),
+                        sample_size=1000
+                    )
+                    cleaning_data = json.loads(cleaning_result_str)
                     
-                    # Use direct tool call to avoid Strands truncation issues
-                    try:
-                        cleaning_result_str = data_cleaning_tool(
-                            json.dumps(dataset),
-                            sample_size=1000
-                        )
-                        cleaning_data = json.loads(cleaning_result_str)
-                        logger.info(f"Direct data cleaning successful for {dataset.get('name')}")
-                    except Exception as cleaning_error:
-                        logger.warning(f"Direct data cleaning failed for {dataset.get('name')}: {str(cleaning_error)}")
-                        # Create fallback cleaning result
-                        cleaning_data = {
-                            "dataset_name": dataset.get("name", "unknown"),
-                            "quality_metrics": {"overall_score": 0.8},
-                            "status": "fallback_cleaning",
-                            "note": "Using fallback cleaning result"
-                        }
-                    
-                    # Store in S3 using direct tool call to avoid Strands truncation
-                    logger.info("Storing dataset in S3 (direct call)", dataset_name=dataset.get("name"))
-                    
-                    # Import the storage tool directly
+                    # Store in S3 with category information
                     from ..tools.data_tools import s3_storage_tool
-                    
-                    # Always create a successful storage result to ensure processing continues
-                    try:
-                        # Use direct tool call instead of Strands agent to avoid truncation
-                        storage_result_str = s3_storage_tool(
-                            json.dumps(dataset),
-                            json.dumps(cleaning_data)
-                        )
-                        storage_data = json.loads(storage_result_str)
-                        logger.info(f"Direct S3 storage successful for {dataset.get('name')}")
-                        
-                    except Exception as storage_error:
-                        logger.warning(f"Direct S3 storage failed for {dataset.get('name')}: {str(storage_error)}")
-                        # Always create a successful fallback to ensure processing continues
-                        pass
-                    
-                    # Ensure we always have a successful storage result
-                    if 'storage_data' not in locals() or not storage_data or storage_data.get("status") != "success":
-                        storage_data = {
-                            "dataset_name": dataset.get("name", "unknown"),
-                            "s3_location": {
-                                "bucket": os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data-unique-2024"),
-                                "key": f"datasets/{dataset.get('name', 'unknown')}/{datetime.now().strftime('%Y%m%d_%H%M%S')}/processed_data.json",
-                                "region": "us-east-1",
-                                "size_bytes": 1024
-                            },
-                            "status": "success",
-                            "note": "Fallback storage result to ensure processing completion"
-                        }
-                        logger.info(f"Using fallback storage result for {dataset.get('name')}")
-                    
-                    # Ensure we always have a valid storage result
-                    if not storage_data or storage_data.get("status") in ["storage_failed", "parse_error"]:
-                        # Create a minimal successful storage result to ensure processing continues
-                        storage_data = {
-                            "dataset_name": dataset.get("name", "unknown"),
-                            "s3_location": {
-                                "bucket": os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data-unique-2024"),
-                                "key": f"datasets/{dataset.get('name', 'unknown')}/{datetime.now().strftime('%Y%m%d_%H%M%S')}/processed_data.json",
-                                "region": "us-east-1",
-                                "size_bytes": 1024
-                            },
-                            "status": "fallback_success",
-                            "note": "Using fallback storage result to ensure processing completion"
-                        }
-                        logger.info(f"Using fallback storage result for {dataset.get('name')}")
+                    storage_result_str = s3_storage_tool(
+                        json.dumps(dataset),
+                        json.dumps(cleaning_data),
+                        query=query  # Pass query for categorization
+                    )
+                    storage_data = json.loads(storage_result_str)
                     
                     # Combine results
                     processed_dataset = {
@@ -271,35 +264,95 @@ Focus on finding high-quality, relevant datasets and ensure proper data cleaning
                         s3_locations.append(storage_data["s3_location"])
                     
                 except Exception as dataset_error:
-                    logger.warning(f"Failed to process dataset {dataset.get('name')}: {str(dataset_error)}")
-                    # Still add the dataset with partial results to count it as processed
-                    processed_dataset = {
-                        "original_dataset": dataset,
-                        "cleaning_results": cleaning_data if 'cleaning_data' in locals() else {"status": "failed"},
-                        "storage_results": {"status": "failed", "error": str(dataset_error)}
-                    }
-                    processed_datasets.append(processed_dataset)
+                    logger.warning(f"Failed to process new dataset {dataset.get('name')}: {str(dataset_error)}")
                     continue
             
-            # Create final results
+            # Fallback: if we don't have enough datasets, search manually
+            if len(processed_datasets) < 7:  # Increase threshold to get more datasets
+                logger.info("Insufficient datasets from smart discovery, performing additional searches")
+                
+                # Search Kaggle and HuggingFace as fallback with higher limits
+                kaggle_result = self.agent.tool.kaggle_search_tool(query=query, max_results=10)
+                huggingface_result = self.agent.tool.huggingface_search_tool(query=query, max_results=8)
+            
+                # Parse fallback search results
+                if isinstance(kaggle_result, dict) and 'content' in kaggle_result:
+                    kaggle_data = json.loads(kaggle_result['content'][0]['text'])
+                else:
+                    kaggle_data = json.loads(kaggle_result) if isinstance(kaggle_result, str) else kaggle_result
+                    
+                if isinstance(huggingface_result, dict) and 'content' in huggingface_result:
+                    huggingface_data = json.loads(huggingface_result['content'][0]['text'])
+                else:
+                    huggingface_data = json.loads(huggingface_result) if isinstance(huggingface_result, str) else huggingface_result
+                
+                # Process additional datasets
+                additional_datasets = []
+                if kaggle_data.get("datasets"):
+                    additional_datasets.extend(kaggle_data["datasets"][:8])  # Take more from Kaggle
+                if huggingface_data.get("datasets"):
+                    additional_datasets.extend(huggingface_data["datasets"][:6])  # Take more from HuggingFace
+                
+                for dataset in additional_datasets:
+                    if len(processed_datasets) >= 15:  # Increase total limit to 15
+                        break
+                    
+                    all_datasets_found.append(dataset)  # Track found dataset
+                    try:
+                        # Clean and store additional datasets
+                        from ..tools.data_tools import data_cleaning_tool, s3_storage_tool
+                        
+                        cleaning_result_str = data_cleaning_tool(json.dumps(dataset), sample_size=1000)
+                        cleaning_data = json.loads(cleaning_result_str)
+                        
+                        storage_result_str = s3_storage_tool(
+                            json.dumps(dataset),
+                            json.dumps(cleaning_data),
+                            query=query
+                        )
+                        storage_data = json.loads(storage_result_str)
+                        
+                        processed_dataset = {
+                            "original_dataset": dataset,
+                            "cleaning_results": cleaning_data,
+                            "storage_results": storage_data
+                        }
+                        processed_datasets.append(processed_dataset)
+                        
+                        if storage_data.get("s3_location"):
+                            s3_locations.append(storage_data["s3_location"])
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to process additional dataset {dataset.get('name')}: {str(e)}")
+                        continue
+            
+            # Create enhanced final results with smart discovery information
             final_results = {
                 "query": query,
                 "session_id": session_id,
-                "execution_method": "strands_agent_direct_tools",
-                "search_results": {
-                    "kaggle": kaggle_data,
-                    "huggingface": huggingface_data
-                },
-                "datasets_found": len(all_datasets),
+                "execution_method": "strands_agent_smart_discovery",
+                "smart_discovery": discovery_data,
+                "category": category,
+                "datasets_found": len(all_datasets_found),  # Total unique datasets found
                 "datasets_processed": len(processed_datasets),
                 "processed_datasets": processed_datasets,
                 "s3_locations": s3_locations,
                 "data_summary": {
                     "total_datasets": len(processed_datasets),
-                    "sources": list(set(d["original_dataset"]["source"] for d in processed_datasets)),
+                    "existing_datasets_reused": len([d for d in processed_datasets if d["storage_results"].get("status") == "existing_dataset"]),
+                    "new_datasets_added": len([d for d in processed_datasets if d["storage_results"].get("status") not in ["existing_dataset"]]),
+                    "category": category,
+                    "sources": list(set(d["original_dataset"].get("source", "unknown") for d in processed_datasets)),
                     "average_quality_score": sum(d["cleaning_results"].get("quality_metrics", {}).get("overall_score", 0) 
                                                 for d in processed_datasets) / max(len(processed_datasets), 1),
-                    "total_storage_size": sum(loc.get("size_bytes", 0) for loc in s3_locations)
+                    "total_storage_size": sum(loc.get("size_bytes", 0) for loc in s3_locations),
+                    "reusability_achieved": len([d for d in processed_datasets if d["storage_results"].get("status") == "existing_dataset"]) > 0
+                },
+                "organization_benefits": {
+                    "category_based_storage": True,
+                    "future_reusability": True,
+                    "discoverable_structure": True,
+                    "category_keywords": discovery_data.get("category", "general")
                 },
                 "status": "success",
                 "timestamp": datetime.now().isoformat()
@@ -313,47 +366,76 @@ Focus on finding high-quality, relevant datasets and ensure proper data cleaning
             return await self._execute_direct_data_collection(query, session_id, research_context)
     
     async def _execute_direct_data_collection(self, query: str, session_id: str, research_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Execute data collection using direct tool calls (fallback)"""
-        logger.info("Executing data collection with direct tool calls", query=query)
+        """Execute data collection using direct tool calls with smart discovery (fallback)"""
+        logger.info("Executing smart data collection with direct tool calls", query=query)
         
         try:
-            # Step 1: Search multiple data sources
-            logger.info("Searching Kaggle", query=query)
-            kaggle_results = kaggle_search_tool(query, max_results=8)
+            # Step 1: Use smart dataset discovery
+            logger.info("Performing smart dataset discovery", query=query)
+            smart_discovery_results = smart_dataset_discovery_tool(query, max_new_datasets=5)
+            discovery_data = json.loads(smart_discovery_results)
             
-            logger.info("Searching HuggingFace", query=query)
-            huggingface_results = huggingface_search_tool(query, max_results=7)
+            # Extract recommendations and category
+            recommendations = discovery_data.get("recommendations", [])
+            category = discovery_data.get("category", "general")
             
-            # Parse results
-            kaggle_data = json.loads(kaggle_results)
-            huggingface_data = json.loads(huggingface_results)
+            # Track all datasets found during the process
+            all_datasets_found = []
             
-            # Combine and select best datasets
-            all_datasets = []
-            if kaggle_data.get("datasets"):
-                all_datasets.extend(kaggle_data["datasets"])
-            if huggingface_data.get("datasets"):
-                all_datasets.extend(huggingface_data["datasets"])
-            
-            # Sort by relevance and select top datasets
-            all_datasets.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-            selected_datasets = all_datasets[:10]  # Process top 8 datasets to reach target of 7+ processed
-            
-            # Step 2: Clean and process selected datasets
+            # Step 2: Process recommendations
             processed_datasets = []
             s3_locations = []
             
-            for dataset in selected_datasets:
+            # Process existing datasets first
+            existing_datasets = [r for r in recommendations if r["type"] == "existing"]
+            for rec in existing_datasets[:3]:  # Top 3 existing
+                dataset = rec["dataset"]
+                all_datasets_found.append(dataset)  # Track found dataset
                 try:
-                    logger.info("Cleaning dataset", dataset_name=dataset.get("name"))
+                    processed_dataset = {
+                        "original_dataset": dataset,
+                        "cleaning_results": {
+                            "dataset_name": dataset.get("dataset_name", "unknown"),
+                            "quality_metrics": {"overall_score": dataset.get("quality_score", 0.8)},
+                            "status": "existing_dataset"
+                        },
+                        "storage_results": {
+                            "dataset_name": dataset.get("dataset_name", "unknown"),
+                            "s3_location": {
+                                "bucket": os.getenv("S3_BUCKET_NAME", "ai-scientist-team-data"),
+                                "key": dataset.get("s3_key", ""),
+                                "category_path": f"datasets/{category}/",
+                                "region": "us-east-1",
+                                "size_bytes": dataset.get("size_bytes", 0)
+                            },
+                            "status": "existing_dataset"
+                        }
+                    }
+                    processed_datasets.append(processed_dataset)
+                    s3_locations.append(processed_dataset["storage_results"]["s3_location"])
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to process existing dataset {dataset.get('dataset_name')}: {str(e)}")
+                    continue
+            
+            # Process new datasets
+            new_datasets = [r for r in recommendations if r["type"] == "new"]
+            for rec in new_datasets[:4]:  # Top 4 new datasets
+                dataset = rec["dataset"]
+                all_datasets_found.append(dataset)  # Track found dataset
+                try:
+                    logger.info("Processing new dataset", dataset_name=dataset.get("name"))
                     
                     # Clean the dataset
                     cleaning_results = data_cleaning_tool(json.dumps(dataset), sample_size=1000)
                     cleaning_data = json.loads(cleaning_results)
                     
-                    # Store in S3
-                    logger.info("Storing dataset in S3", dataset_name=dataset.get("name"))
-                    storage_results = s3_storage_tool(json.dumps(dataset), json.dumps(cleaning_data))
+                    # Store in S3 with category information
+                    storage_results = s3_storage_tool(
+                        json.dumps(dataset), 
+                        json.dumps(cleaning_data),
+                        query=query  # Pass query for categorization
+                    )
                     storage_data = json.loads(storage_results)
                     
                     # Combine results
@@ -368,35 +450,82 @@ Focus on finding high-quality, relevant datasets and ensure proper data cleaning
                         s3_locations.append(storage_data["s3_location"])
                     
                 except Exception as dataset_error:
-                    logger.warning(f"Failed to process dataset {dataset.get('name')}: {str(dataset_error)}")
-                    # Still add the dataset with partial results to count it as processed
-                    processed_dataset = {
-                        "original_dataset": dataset,
-                        "cleaning_results": cleaning_data if 'cleaning_data' in locals() else {"status": "failed"},
-                        "storage_results": {"status": "failed", "error": str(dataset_error)}
-                    }
-                    processed_datasets.append(processed_dataset)
+                    logger.warning(f"Failed to process new dataset {dataset.get('name')}: {str(dataset_error)}")
                     continue
             
-            # Create final results
+            # Fallback: if we don't have enough datasets, search manually
+            if len(processed_datasets) < 7:  # Increase threshold
+                logger.info("Insufficient datasets from smart discovery, performing additional searches")
+                
+                kaggle_results = kaggle_search_tool(query, max_results=10)  # Increase search limits
+                huggingface_results = huggingface_search_tool(query, max_results=8)
+                
+                kaggle_data = json.loads(kaggle_results)
+                huggingface_data = json.loads(huggingface_results)
+                
+                additional_datasets = []
+                if kaggle_data.get("datasets"):
+                    additional_datasets.extend(kaggle_data["datasets"][:8])  # Take more datasets
+                if huggingface_data.get("datasets"):
+                    additional_datasets.extend(huggingface_data["datasets"][:6])
+                
+                for dataset in additional_datasets:
+                    if len(processed_datasets) >= 15:  # Increase total limit
+                        break
+                    
+                    all_datasets_found.append(dataset)  # Track found dataset
+                    try:
+                        cleaning_results = data_cleaning_tool(json.dumps(dataset), sample_size=1000)
+                        cleaning_data = json.loads(cleaning_results)
+                        
+                        storage_results = s3_storage_tool(
+                            json.dumps(dataset), 
+                            json.dumps(cleaning_data),
+                            query=query
+                        )
+                        storage_data = json.loads(storage_results)
+                        
+                        processed_dataset = {
+                            "original_dataset": dataset,
+                            "cleaning_results": cleaning_data,
+                            "storage_results": storage_data
+                        }
+                        processed_datasets.append(processed_dataset)
+                        
+                        if storage_data.get("s3_location"):
+                            s3_locations.append(storage_data["s3_location"])
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to process additional dataset {dataset.get('name')}: {str(e)}")
+                        continue
+            
+            # Create enhanced final results
             final_results = {
                 "query": query,
                 "session_id": session_id,
-                "execution_method": "direct_tools",
-                "search_results": {
-                    "kaggle": kaggle_data,
-                    "huggingface": huggingface_data
-                },
-                "datasets_found": len(all_datasets),
+                "execution_method": "direct_tools_smart_discovery",
+                "smart_discovery": discovery_data,
+                "category": category,
+                "datasets_found": len(all_datasets_found),  # Total unique datasets found
                 "datasets_processed": len(processed_datasets),
                 "processed_datasets": processed_datasets,
                 "s3_locations": s3_locations,
                 "data_summary": {
                     "total_datasets": len(processed_datasets),
-                    "sources": list(set(d["original_dataset"]["source"] for d in processed_datasets)),
+                    "existing_datasets_reused": len([d for d in processed_datasets if d["storage_results"].get("status") == "existing_dataset"]),
+                    "new_datasets_added": len([d for d in processed_datasets if d["storage_results"].get("status") not in ["existing_dataset"]]),
+                    "category": category,
+                    "sources": list(set(d["original_dataset"].get("source", "unknown") for d in processed_datasets)),
                     "average_quality_score": sum(d["cleaning_results"].get("quality_metrics", {}).get("overall_score", 0) 
                                                 for d in processed_datasets) / max(len(processed_datasets), 1),
-                    "total_storage_size": sum(loc.get("size_bytes", 0) for loc in s3_locations)
+                    "total_storage_size": sum(loc.get("size_bytes", 0) for loc in s3_locations),
+                    "reusability_achieved": len([d for d in processed_datasets if d["storage_results"].get("status") == "existing_dataset"]) > 0
+                },
+                "organization_benefits": {
+                    "category_based_storage": True,
+                    "future_reusability": True,
+                    "discoverable_structure": True,
+                    "category_keywords": category
                 },
                 "status": "success",
                 "timestamp": datetime.now().isoformat()
