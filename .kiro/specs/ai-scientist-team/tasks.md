@@ -40,7 +40,7 @@
 
 ## Phase 2: Strands-Powered Agent Development (Each Shippable Independently)
 
-- [ ] 4. Develop Research Agent as Strands agent with external API tools
+- [x] 4. Develop Research Agent as Strands agent with external API tools
   - Create Strands Research Agent with hypothesis generation system prompt
   - Implement arXiv and PubMed search as Strands tools with proper error handling
   - Build literature analysis and relevance scoring tools for the Strands agent
@@ -52,7 +52,7 @@
   - **Shippable Outcome:** Fully functional Strands research agent with integrated tools and context management
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
 
-- [ ] 5. Create Data Collection Agent as Strands agent with dataset tools
+- [x] 5. Create Data Collection Agent as Strands agent with dataset tools
   - Implement Strands Data Agent with dataset discovery system prompt
   - Build Kaggle, HuggingFace, and AWS Open Data tools for the Strands agent
   - Create data cleaning and quality assessment tools using pandas integration

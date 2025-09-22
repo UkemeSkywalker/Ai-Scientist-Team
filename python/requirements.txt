@@ -13,6 +13,7 @@ numpy>=1.26.0
 # API clients
 requests>=2.31.0
 httpx>=0.25.2
+kaggle>=1.5.16
 
 # Logging and monitoring
 structlog>=23.2.0
