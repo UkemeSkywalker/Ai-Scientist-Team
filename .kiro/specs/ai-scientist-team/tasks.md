@@ -65,7 +65,7 @@
   - **Shippable Outcome:** Production-ready Strands data agent with integrated dataset tools and storage
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
 
-- [ ] 6. Build Experiment Agent as Strands agent with ML tools
+- [x] 6. Build Experiment Agent as Strands agent with ML tools
   - Create Strands Experiment Agent with experiment design system prompt
   - Implement SageMaker integration as Strands tools for ML training and job management
   - Build statistical analysis tools using scipy and statsmodels for the Strands agent
