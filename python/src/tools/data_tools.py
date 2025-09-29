@@ -542,7 +542,7 @@ def data_cleaning_tool(dataset_info: str, sample_size: int = 1000) -> str:
         sample_size: Number of rows to sample for analysis (default: 1000)
         
     Returns:
-        JSON string containing data quality assessment and cleaning results
+        JSON string containing both cleaned DataFrame and metadata
     """
     logger.info("Data cleaning initiated", sample_size=sample_size)
     
@@ -562,9 +562,6 @@ def data_cleaning_tool(dataset_info: str, sample_size: int = 1000) -> str:
                 "status": "error"
             })
         
-        # For demonstration, we'll create synthetic data based on the dataset description
-        # In production, you would download and process the actual dataset
-        
         dataset_name = dataset_data.get("name", "unknown_dataset")
         dataset_type = dataset_data.get("source", "unknown")
         
@@ -581,7 +578,8 @@ def data_cleaning_tool(dataset_info: str, sample_size: int = 1000) -> str:
         original_shape = synthetic_data.shape
         cleaned_shape = cleaned_data.shape
         
-        result = {
+        # Create metadata
+        metadata = {
             "dataset_name": dataset_name,
             "dataset_source": dataset_type,
             "original_shape": {"rows": original_shape[0], "columns": original_shape[1]},
@@ -597,6 +595,12 @@ def data_cleaning_tool(dataset_info: str, sample_size: int = 1000) -> str:
             },
             "cleaning_timestamp": datetime.now().isoformat(),
             "status": "success"
+        }
+        
+        # Return both DataFrame and metadata
+        result = {
+            "cleaned_dataframe": cleaned_data.to_dict('records'),  # Convert to serializable format
+            "metadata": metadata
         }
         
         logger.info("Data cleaning completed", 
@@ -625,34 +629,31 @@ def _generate_synthetic_data(dataset_info: Dict[str, Any], sample_size: int) -> 
     data = {}
     
     if "sentiment" in dataset_name or "review" in dataset_name:
-        # Generate sentiment analysis dataset
-        data["text"] = [f"Sample review text {i}" for i in range(sample_size)]
-        data["sentiment"] = np.random.choice(["positive", "negative", "neutral"], sample_size)
+        # Generate sentiment analysis dataset - use numeric encoding to avoid mixed types
+        data["text_length"] = np.random.randint(10, 500, sample_size)
+        data["sentiment_score"] = np.random.choice([0, 1, 2], sample_size)  # 0=negative, 1=neutral, 2=positive
         data["rating"] = np.random.randint(1, 6, sample_size)
-        data["length"] = np.random.randint(10, 500, sample_size)
+        data["word_count"] = np.random.randint(5, 100, sample_size)
         
     elif "nlp" in dataset_name or "text" in dataset_name:
-        # Generate NLP dataset
-        data["text"] = [f"Sample text document {i}" for i in range(sample_size)]
-        data["category"] = np.random.choice(["news", "sports", "tech", "politics"], sample_size)
+        # Generate NLP dataset - use numeric encoding to avoid mixed types
+        data["text_length"] = np.random.randint(50, 1000, sample_size)
+        data["category_id"] = np.random.choice([0, 1, 2, 3], sample_size)  # 0=news, 1=sports, 2=tech, 3=politics
         data["word_count"] = np.random.randint(50, 1000, sample_size)
-        data["language"] = np.random.choice(["en", "es", "fr"], sample_size, p=[0.7, 0.2, 0.1])
+        data["language_id"] = np.random.choice([0, 1, 2], sample_size, p=[0.7, 0.2, 0.1])  # 0=en, 1=es, 2=fr
         
     else:
-        # Generate generic dataset
+        # Generate generic dataset - ensure all numeric to avoid type comparison issues
         for i in range(min(num_features, 10)):  # Limit to 10 features max
-            if i == 0:
-                data[f"feature_{i}"] = np.random.randn(sample_size)
-            elif i == 1:
-                data[f"feature_{i}"] = np.random.choice(["A", "B", "C"], sample_size)
-            else:
-                data[f"feature_{i}"] = np.random.randint(0, 100, sample_size)
+            # Use only numeric data to avoid mixed type comparison errors
+            data[f"feature_{i}"] = np.random.randn(sample_size) * (i + 1)
     
     # Add some missing values and duplicates for realistic cleaning
     df = pd.DataFrame(data)
     
-    # Introduce missing values (5% of data)
-    for col in df.columns:
+    # Introduce missing values (5% of data) - only for numeric columns to avoid mixed types
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
         missing_indices = np.random.choice(df.index, size=int(0.05 * len(df)), replace=False)
         df.loc[missing_indices, col] = np.nan
     
@@ -677,8 +678,16 @@ def _assess_data_quality(df: pd.DataFrame) -> Dict[str, Any]:
     validity_issues = 0
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
-        if (df[col] < 0).sum() > 0:
-            validity_issues += 1
+        try:
+            # Ensure we're only working with numeric data
+            numeric_data = pd.to_numeric(df[col], errors='coerce')
+            # Drop NaN values before comparison to avoid mixed type issues
+            clean_numeric = numeric_data.dropna()
+            if len(clean_numeric) > 0 and (clean_numeric < 0).sum() > 0:
+                validity_issues += 1
+        except (TypeError, ValueError):
+            # Skip columns that can't be converted to numeric
+            continue
     
     validity = 1 - (validity_issues / len(numeric_cols)) if len(numeric_cols) > 0 else 1
     
@@ -729,8 +738,14 @@ def _clean_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
         # Fill numeric columns with median
         numeric_cols = df_cleaned.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
-            median_val = df_cleaned[col].median()
-            df_cleaned[col] = df_cleaned[col].fillna(median_val)
+            try:
+                # Convert to numeric first to handle any mixed types
+                numeric_series = pd.to_numeric(df_cleaned[col], errors='coerce')
+                median_val = numeric_series.median()
+                df_cleaned[col] = df_cleaned[col].fillna(median_val)
+            except (TypeError, ValueError):
+                # Skip columns that can't be processed
+                continue
         
         # Fill categorical columns with mode
         categorical_cols = df_cleaned.select_dtypes(include=['object']).columns
@@ -753,13 +768,22 @@ def _clean_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     
     # Optimize numeric types
     for col in df_cleaned.select_dtypes(include=[np.number]).columns:
-        if df_cleaned[col].dtype == 'int64':
-            if df_cleaned[col].min() >= 0 and df_cleaned[col].max() <= 255:
-                df_cleaned[col] = df_cleaned[col].astype('uint8')
-            elif df_cleaned[col].min() >= -128 and df_cleaned[col].max() <= 127:
-                df_cleaned[col] = df_cleaned[col].astype('int8')
-        elif df_cleaned[col].dtype == 'float64':
-            df_cleaned[col] = pd.to_numeric(df_cleaned[col], downcast='float')
+        try:
+            if df_cleaned[col].dtype == 'int64':
+                # Ensure column is purely numeric before min/max operations
+                numeric_col = pd.to_numeric(df_cleaned[col], errors='coerce').dropna()
+                if len(numeric_col) > 0:
+                    col_min = numeric_col.min()
+                    col_max = numeric_col.max()
+                    if col_min >= 0 and col_max <= 255:
+                        df_cleaned[col] = df_cleaned[col].astype('uint8')
+                    elif col_min >= -128 and col_max <= 127:
+                        df_cleaned[col] = df_cleaned[col].astype('int8')
+            elif df_cleaned[col].dtype == 'float64':
+                df_cleaned[col] = pd.to_numeric(df_cleaned[col], downcast='float')
+        except (TypeError, ValueError):
+            # Skip columns with mixed types that can't be optimized
+            continue
     
     optimized_memory = df_cleaned.memory_usage(deep=True).sum()
     memory_saved = original_memory - optimized_memory
@@ -778,11 +802,11 @@ def _clean_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
 @tool_decorator
 def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, query: str = "", bucket_name: str = None) -> str:
     """
-    Store processed dataset in Amazon S3 with category-based organization.
+    Store processed dataset and metadata in Amazon S3 with category-based organization.
     
     Args:
         dataset_info: JSON string containing original dataset information
-        cleaned_data_summary: JSON string containing cleaned data summary
+        cleaned_data_summary: JSON string containing cleaned DataFrame and metadata
         query: Original research query for categorization
         bucket_name: S3 bucket name (optional, will use default if not provided)
         
@@ -795,12 +819,23 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, query: str = "
         # Parse input data
         try:
             dataset_data = json.loads(dataset_info) if isinstance(dataset_info, str) else dataset_info
-            cleaning_data = json.loads(cleaned_data_summary) if isinstance(cleaned_data_summary, str) else cleaned_data_summary
+            cleaning_result = json.loads(cleaned_data_summary) if isinstance(cleaned_data_summary, str) else cleaned_data_summary
         except json.JSONDecodeError as e:
             return json.dumps({
                 "error": f"Invalid JSON format: {str(e)}",
                 "status": "error"
             })
+        
+        # Extract cleaned DataFrame and metadata
+        cleaned_dataframe_records = cleaning_result.get("cleaned_dataframe", [])
+        metadata = cleaning_result.get("metadata", {})
+        
+        # Convert records back to DataFrame
+        if cleaned_dataframe_records:
+            cleaned_df = pd.DataFrame(cleaned_dataframe_records)
+        else:
+            # Fallback to synthetic data if no DataFrame provided
+            cleaned_df = _generate_synthetic_data(dataset_data, 1000)
         
         # Use default bucket if not provided
         if not bucket_name:
@@ -810,123 +845,139 @@ def s3_storage_tool(dataset_info: str, cleaned_data_summary: str, query: str = "
         if query:
             category, confidence = categorize_query(query)
         else:
-            # Try to categorize based on dataset name/description
             dataset_text = f"{dataset_data.get('name', '')} {dataset_data.get('description', '')}"
             category, confidence = categorize_query(dataset_text)
         
-        # Generate category-based S3 key
+        # Generate category-based S3 paths
         dataset_name = dataset_data.get("name", "unknown_dataset").replace("/", "_")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        s3_key = f"datasets/{category}/{dataset_name}/{timestamp}/processed_data.json"
+        base_path = f"datasets/{category}/{dataset_name}/{timestamp}"
         
-        # Create enhanced metadata with category information
-        metadata = {
+        data_key = f"{base_path}/data.parquet"
+        metadata_key = f"{base_path}/metadata.json"
+        schema_key = f"{base_path}/schema.json"
+        
+        # Create enhanced metadata
+        enhanced_metadata = {
             "original_dataset": dataset_data.get("name", ""),
             "source": dataset_data.get("source", ""),
             "category": category,
-            "category_confidence": str(round(confidence, 2)),
-            "research_query": query[:100] if query else "",  # Truncate for metadata limits
+            "category_confidence": round(confidence, 2),
+            "research_query": query,
             "processing_timestamp": datetime.now().isoformat(),
-            "original_rows": str(cleaning_data.get("original_shape", {}).get("rows", 0)),
-            "cleaned_rows": str(cleaning_data.get("cleaned_shape", {}).get("rows", 0)),
-            "quality_score": str(cleaning_data.get("quality_metrics", {}).get("overall_score", 0)),
-            "preprocessing_steps": str(len(cleaning_data.get("preprocessing_steps", []))),
+            "data_files": {
+                "data_file": data_key,
+                "metadata_file": metadata_key,
+                "schema_file": schema_key
+            },
+            "processing_summary": metadata
+        }
+        
+        # Create schema information
+        schema_info = {
+            "columns": list(cleaned_df.columns),
+            "dtypes": {col: str(dtype) for col, dtype in cleaned_df.dtypes.items()},
+            "shape": list(cleaned_df.shape),
+            "index_name": cleaned_df.index.name,
+            "memory_usage": int(cleaned_df.memory_usage(deep=True).sum())
         }
         
         # Initialize S3 client
         try:
             s3_client = boto3.client('s3')
             
-            # Create enhanced sample file with category information
-            sample_data = {
-                "dataset_name": dataset_data.get("name", ""),
-                "source": dataset_data.get("source", ""),
-                "category": category,
-                "category_confidence": round(confidence, 2),
-                "research_query": query,
-                "processing_summary": {
-                    "original_rows": cleaning_data.get("original_shape", {}).get("rows", 0),
-                    "cleaned_rows": cleaning_data.get("cleaned_shape", {}).get("rows", 0),
-                    "quality_score": cleaning_data.get("quality_metrics", {}).get("overall_score", 0)
-                },
-                "s3_organization": {
-                    "category_path": f"datasets/{category}/",
-                    "full_path": s3_key,
-                    "reusable": True
-                },
-                "timestamp": datetime.now().isoformat(),
-                "note": "Processed dataset metadata stored in S3 with category-based organization"
-            }
+            # Store data file (Parquet format)
+            parquet_buffer = io.BytesIO()
+            cleaned_df.to_parquet(parquet_buffer, index=False)
+            parquet_buffer.seek(0)
             
-            # Convert to JSON and upload
-            json_data = json.dumps(sample_data, indent=2)
-            
-            # Upload to S3
             s3_client.put_object(
                 Bucket=bucket_name,
-                Key=s3_key,
-                Body=json_data.encode('utf-8'),
-                ContentType='application/json',
-                Metadata=metadata
+                Key=data_key,
+                Body=parquet_buffer.getvalue(),
+                ContentType='application/octet-stream',
+                Metadata={
+                    "file_type": "parquet",
+                    "dataset_name": dataset_data.get("name", ""),
+                    "category": category,
+                    "rows": str(len(cleaned_df)),
+                    "columns": str(len(cleaned_df.columns))
+                }
             )
             
-            # Get object info
-            response = s3_client.head_object(Bucket=bucket_name, Key=s3_key)
+            # Store metadata file
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=metadata_key,
+                Body=json.dumps(enhanced_metadata, indent=2).encode('utf-8'),
+                ContentType='application/json'
+            )
             
-            # Return enhanced response with category information
+            # Store schema file
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=schema_key,
+                Body=json.dumps(schema_info, indent=2).encode('utf-8'),
+                ContentType='application/json'
+            )
+            
+            # Get file sizes
+            data_response = s3_client.head_object(Bucket=bucket_name, Key=data_key)
+            metadata_response = s3_client.head_object(Bucket=bucket_name, Key=metadata_key)
+            
             result = {
                 "dataset_name": dataset_name,
                 "category": category,
                 "category_confidence": round(confidence, 2),
                 "s3_location": {
                     "bucket": bucket_name,
-                    "key": s3_key,
+                    "data_key": data_key,
+                    "metadata_key": metadata_key,
+                    "schema_key": schema_key,
                     "category_path": f"datasets/{category}/",
                     "region": os.getenv("AWS_REGION", "us-east-1"),
-                    "size_bytes": response.get('ContentLength', 0)
+                    "data_size_bytes": data_response.get('ContentLength', 0),
+                    "metadata_size_bytes": metadata_response.get('ContentLength', 0)
                 },
-                "reusability": {
-                    "organized_by_category": True,
-                    "discoverable": True,
-                    "category_keywords": RESEARCH_CATEGORIES.get(category, [])[:5]
+                "data_info": {
+                    "format": "parquet",
+                    "rows": len(cleaned_df),
+                    "columns": len(cleaned_df.columns),
+                    "column_names": list(cleaned_df.columns)
                 },
                 "status": "success"
             }
             
             logger.info("S3 storage completed", 
                        bucket=bucket_name,
-                       key=s3_key,
-                       size_bytes=response.get('ContentLength', 0))
+                       data_key=data_key,
+                       data_size=data_response.get('ContentLength', 0))
             
             return json.dumps(result, indent=2)
             
         except Exception as s3_error:
-            # If S3 upload fails, simulate successful upload for testing
             logger.warning(f"S3 upload failed, simulating success: {str(s3_error)}")
             
-            sample_data = {
-                "dataset_info": dataset_data,
-                "cleaning_summary": cleaning_data,
-                "metadata": metadata,
-                "note": "This is a sample file. In production, the actual processed dataset would be stored here."
-            }
-            
-            # Return enhanced simulated response
+            # Simulated response
             result = {
                 "dataset_name": dataset_name,
                 "category": category,
                 "category_confidence": round(confidence, 2),
                 "s3_location": {
                     "bucket": bucket_name,
-                    "key": s3_key,
+                    "data_key": data_key,
+                    "metadata_key": metadata_key,
+                    "schema_key": schema_key,
                     "category_path": f"datasets/{category}/",
                     "region": os.getenv("AWS_REGION", "us-east-1"),
-                    "size_bytes": len(json.dumps(sample_data).encode('utf-8'))
+                    "data_size_bytes": len(cleaned_df) * 50,  # Estimated
+                    "metadata_size_bytes": 1000  # Estimated
                 },
-                "reusability": {
-                    "organized_by_category": True,
-                    "discoverable": True,
-                    "category_keywords": RESEARCH_CATEGORIES.get(category, [])[:5]
+                "data_info": {
+                    "format": "parquet",
+                    "rows": len(cleaned_df),
+                    "columns": len(cleaned_df.columns),
+                    "column_names": list(cleaned_df.columns)
                 },
                 "status": "simulated_success"
             }

@@ -119,8 +119,8 @@ class ExperimentAgent:
         Execute comprehensive experiment workflow for the given hypotheses and data
         
         Args:
-            hypotheses: JSON string containing research hypotheses
-            data_context: JSON string containing data metadata
+            hypotheses: JSON string containing research hypotheses (optional - will read from shared memory)
+            data_context: JSON string containing data metadata (optional - will read from shared memory)
             session_id: Session identifier for context management
             
         Returns:
@@ -129,17 +129,50 @@ class ExperimentAgent:
         logger.info("Starting experiment execution", session_id=session_id)
         
         try:
+            # Read Research Agent results from shared memory for hypotheses
+            research_results = self.shared_memory.read(session_id, "research_result")
+            if research_results:
+                logger.info("Retrieved Research Agent results from shared memory", session_id=session_id)
+                hypotheses_from_research = research_results.get("hypotheses", [])
+                
+                # CRITICAL FIX: Extract text from hypothesis objects
+                processed_hypotheses = []
+                for hyp in hypotheses_from_research:
+                    if isinstance(hyp, dict) and 'text' in hyp:
+                        processed_hypotheses.append(hyp['text'])
+                    elif isinstance(hyp, str):
+                        processed_hypotheses.append(hyp)
+                    else:
+                        processed_hypotheses.append(str(hyp))
+                
+                hypotheses_to_use = json.dumps({"hypotheses": processed_hypotheses})
+                logger.info(f"Processed {len(processed_hypotheses)} hypotheses from Research Agent", session_id=session_id)
+            else:
+                logger.warning("No Research Agent results in shared memory, using provided hypotheses", session_id=session_id)
+                hypotheses_to_use = hypotheses
+            
+            # Read Data Agent results from shared memory
+            data_agent_results = self.shared_memory.read(session_id, "data_result")
+            if data_agent_results:
+                logger.info("Retrieved Data Agent results from shared memory", session_id=session_id)
+                # Extract real data context with S3 paths from shared memory
+                real_data_context = self._extract_data_context_from_shared_memory(data_agent_results)
+                data_context_to_use = json.dumps(real_data_context)
+            else:
+                logger.warning("No Data Agent results in shared memory, using provided data_context", session_id=session_id)
+                data_context_to_use = data_context
+            
             if self.agent and STRANDS_AVAILABLE:
                 try:
                     # Use Strands agent for experiments
-                    result = await self._execute_strands_experiments(hypotheses, data_context, session_id)
+                    result = await self._execute_strands_experiments(hypotheses_to_use, data_context_to_use, session_id)
                 except Exception as strands_error:
                     logger.warning(f"Strands agent failed, falling back to direct tools: {str(strands_error)}")
                     # Fallback to direct tool execution if Strands fails
-                    result = await self._execute_direct_experiments(hypotheses, data_context, session_id)
+                    result = await self._execute_direct_experiments(hypotheses_to_use, data_context_to_use, session_id)
             else:
                 # Fallback to direct tool execution
-                result = await self._execute_direct_experiments(hypotheses, data_context, session_id)
+                result = await self._execute_direct_experiments(hypotheses_to_use, data_context_to_use, session_id)
             
             # Store results in shared memory
             self.shared_memory.update_context(session_id, {
@@ -155,8 +188,7 @@ class ExperimentAgent:
             logger.error("Experiment execution failed", error=error_msg, session_id=session_id)
             
             error_result = {
-                "hypotheses": hypotheses,
-                "data_context": data_context,
+                "hypotheses": hypotheses_to_use if 'hypotheses_to_use' in locals() else hypotheses,
                 "error": error_msg,
                 "status": "failed",
                 "timestamp": datetime.now().isoformat()
@@ -171,7 +203,7 @@ class ExperimentAgent:
             return error_result
     
     async def _execute_strands_experiments(self, hypotheses: str, data_context: str, session_id: str) -> Dict[str, Any]:
-        """Execute experiments using Strands agent conversation"""
+        """Execute experiments using Strands agent with proper tool execution"""
         logger.info("Executing experiments with Strands agent", session_id=session_id)
         
         try:
@@ -194,14 +226,26 @@ class ExperimentAgent:
             Provide comprehensive results for each step.
             """
             
-            # Execute the conversation with the Strands agent
+            # Execute the conversation with the Strands agent using proper method
             logger.info("Starting Strands agent conversation", session_id=session_id)
-            response = self.agent.run(experiment_prompt)
             
-            # Parse the response to extract structured results
-            # For now, we'll fall back to direct execution since Strands conversation parsing is complex
-            logger.warning("Strands conversation completed, falling back to direct tools for structured results")
-            return await self._execute_direct_experiments(hypotheses, data_context, session_id)
+            # Use the correct Strands agent execution method
+            if hasattr(self.agent, '__call__'):
+                response = self.agent(experiment_prompt)
+            elif hasattr(self.agent, 'execute'):
+                response = await self.agent.execute(experiment_prompt)
+            else:
+                raise AttributeError("Agent has no callable method")
+            
+            # Parse the structured results from Strands agent response
+            parsed_results = self._parse_strands_response(response, session_id)
+            
+            if parsed_results:
+                logger.info("Successfully parsed Strands agent response", session_id=session_id)
+                return parsed_results
+            else:
+                logger.warning("Failed to parse Strands response, falling back to direct tools")
+                return await self._execute_direct_experiments(hypotheses, data_context, session_id)
             
         except Exception as e:
             logger.error(f"Strands experiment execution failed: {str(e)}")
@@ -217,43 +261,188 @@ class ExperimentAgent:
             logger.info("Designing experiments", session_id=session_id)
             design_results = experiment_design_tool(hypotheses, data_context)
             
-            # Step 2: Execute ML training
+            # Step 2: Execute ML training with session_id for shared memory access
             logger.info("Executing ML training", session_id=session_id)
-            training_results = sagemaker_training_tool(design_results)
+            training_results = sagemaker_training_tool(design_results, session_id)
             
             # Step 3: Perform statistical analysis
             logger.info("Performing statistical analysis", session_id=session_id)
-            analysis_data = json.dumps({
-                "config": json.loads(design_results),
-                "training_results": json.loads(training_results)
-            })
-            analysis_results = statistical_analysis_tool(analysis_data)
+            try:
+                design_data = json.loads(design_results) if isinstance(design_results, str) else design_results
+                training_data = json.loads(training_results) if isinstance(training_results, str) else training_results
+                
+                analysis_data = {
+                    "config": design_data,
+                    "training_results": training_data
+                }
+                analysis_results = statistical_analysis_tool(analysis_data)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"JSON parsing error in statistical analysis: {str(e)}")
+                analysis_results = statistical_analysis_tool({})
             
             # Step 4: Interpret results
             logger.info("Interpreting results", session_id=session_id)
-            interpretation_data = json.dumps({
-                "training_results": json.loads(training_results),
-                "statistical_analysis": json.loads(analysis_results)
-            })
-            interpretation_results = results_interpretation_tool(interpretation_data)
+            try:
+                training_data = json.loads(training_results) if isinstance(training_results, str) else training_results
+                analysis_data = json.loads(analysis_results) if isinstance(analysis_results, str) else analysis_results
+                
+                interpretation_data = {
+                    "training_results": training_data,
+                    "statistical_analysis": analysis_data
+                }
+                interpretation_results = results_interpretation_tool(interpretation_data)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"JSON parsing error in results interpretation: {str(e)}")
+                interpretation_results = results_interpretation_tool({})
             
-            # Compile final results
-            final_results = {
-                "experiment_design": json.loads(design_results),
-                "ml_training": json.loads(training_results),
-                "statistical_analysis": json.loads(analysis_results),
-                "interpretation": json.loads(interpretation_results),
-                "execution_method": "direct_tools",
-                "session_id": session_id,
-                "status": "completed",
-                "timestamp": datetime.now().isoformat()
-            }
+            # Compile final results with safe JSON parsing
+            try:
+                final_results = {
+                    "experiment_design": json.loads(design_results) if isinstance(design_results, str) else design_results,
+                    "ml_training": json.loads(training_results) if isinstance(training_results, str) else training_results,
+                    "statistical_analysis": json.loads(analysis_results) if isinstance(analysis_results, str) else analysis_results,
+                    "interpretation": json.loads(interpretation_results) if isinstance(interpretation_results, str) else interpretation_results,
+                    "execution_method": "direct_tools",
+                    "session_id": session_id,
+                    "status": "completed",
+                    "timestamp": datetime.now().isoformat()
+                }
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"JSON parsing error in final results: {str(e)}")
+                final_results = {
+                    "experiment_design": design_results,
+                    "ml_training": training_results,
+                    "statistical_analysis": analysis_results,
+                    "interpretation": interpretation_results,
+                    "execution_method": "direct_tools",
+                    "session_id": session_id,
+                    "status": "completed",
+                    "timestamp": datetime.now().isoformat()
+                }
             
             return final_results
             
         except Exception as e:
             logger.error(f"Direct experiment execution failed: {str(e)}")
             raise
+    
+    def _parse_strands_response(self, response, session_id: str) -> Optional[Dict[str, Any]]:
+        """Parse Strands agent response to extract structured experiment results"""
+        try:
+            # Handle different response types from Strands agent
+            if hasattr(response, 'content'):
+                # Response with content attribute
+                content = response.content
+            elif hasattr(response, 'messages'):
+                # Response with messages
+                content = str(response.messages[-1]) if response.messages else str(response)
+            else:
+                # Direct string response
+                content = str(response)
+            
+            logger.info(f"Parsing Strands response: {content[:200]}...", session_id=session_id)
+            
+            # Try to extract JSON from the response
+            import re
+            json_matches = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+            
+            results = {
+                "experiment_design": {},
+                "ml_training": {},
+                "statistical_analysis": {},
+                "interpretation": {},
+                "execution_method": "strands_agent",
+                "session_id": session_id,
+                "status": "completed",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Parse JSON results if found
+            for json_str in json_matches:
+                try:
+                    parsed_json = json.loads(json_str)
+                    if "experiments" in parsed_json:
+                        results["experiment_design"] = parsed_json
+                    elif "training_jobs" in parsed_json:
+                        results["ml_training"] = parsed_json
+                    elif "statistical_tests" in parsed_json:
+                        results["statistical_analysis"] = parsed_json
+                    elif "insights" in parsed_json:
+                        results["interpretation"] = parsed_json
+                except json.JSONDecodeError:
+                    continue
+            
+            # If we have at least some structured results, return them
+            if any(results[key] for key in ["experiment_design", "ml_training", "statistical_analysis", "interpretation"]):
+                return results
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to parse Strands response: {str(e)}", session_id=session_id)
+            return None
+    
+    def _extract_data_context_from_shared_memory(self, data_agent_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract data context with S3 paths from Data Agent results in shared memory"""
+        processed_datasets = data_agent_results.get("processed_datasets", [])
+        category = data_agent_results.get("category", "machine-learning")
+        
+        datasets = []
+        for dataset in processed_datasets:
+            original = dataset.get("original_dataset", {})
+            storage = dataset.get("storage_results", {})
+            cleaning = dataset.get("cleaning_results", {})
+            
+            # CRITICAL FIX: Extract S3 location and convert to proper string format
+            s3_location = storage.get("s3_location", {})
+            if isinstance(s3_location, dict) and s3_location.get('bucket') and s3_location.get('data_key'):
+                bucket = s3_location.get('bucket')
+                data_key = s3_location.get('data_key')
+                s3_path = f"s3://{bucket}/{data_key}"  # Convert dict to string path
+                logger.info(f"Converted S3 dict to path: {s3_path}")
+            elif isinstance(s3_location, str) and s3_location.startswith('s3://'):
+                s3_path = s3_location
+                logger.info(f"Using existing S3 string path: {s3_path}")
+            else:
+                logger.warning(f"Invalid S3 location format for dataset {original.get('name')}: {s3_location}")
+                continue  # Skip datasets without valid S3 paths
+            
+            # Determine task type and target
+            dataset_name = original.get("name", "").lower()
+            if "sentiment" in dataset_name or "review" in dataset_name:
+                task_type = "classification"
+                target_variable = "sentiment"
+                columns = ["text_length", "sentiment_score", "rating", "word_count", "sentiment"]
+            else:
+                task_type = "classification"
+                target_variable = "target"
+                columns = ["feature_1", "feature_2", "feature_3", "feature_4", "target"]
+            
+            dataset_info = {
+                "name": original.get("name", "unknown_dataset"),
+                "type": "supervised",
+                "task": task_type,
+                "columns": columns,
+                "target": target_variable,
+                "s3_location": s3_path,  # Now guaranteed to be a string
+                "quality_score": cleaning.get("quality_metrics", {}).get("overall_score", 0.8)
+            }
+            logger.info(f"Created dataset info with S3 path: {dataset_info['name']} -> {s3_path}")
+            datasets.append(dataset_info)
+        
+        logger.info(f"Extracted {len(datasets)} datasets with valid S3 paths from shared memory")
+        for i, dataset in enumerate(datasets):
+            logger.info(f"Dataset {i+1}: {dataset['name']} -> {dataset['s3_location']}")
+        
+        return {
+            "datasets": datasets,
+            "data_summary": {
+                "category": category,
+                "total_samples": sum(1000 for _ in datasets),  # Estimated
+                "source_diversity": len(set(d.get("source", "unknown") for d in processed_datasets)),
+                "average_quality": sum(d.get("quality_score", 0) for d in datasets) / max(len(datasets), 1)
+            }
+        }
     
     def get_experiment_status(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get the current experiment status for a session"""

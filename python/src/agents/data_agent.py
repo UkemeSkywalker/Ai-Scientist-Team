@@ -115,7 +115,7 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
         Execute comprehensive data collection workflow for the given query
         
         Args:
-            query: Data search query
+            query: Data search query (optional - will read from shared memory)
             session_id: Session identifier for context management
             research_context: Optional research context from previous agents
             
@@ -125,17 +125,26 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
         logger.info("Starting data collection execution", query=query, session_id=session_id)
         
         try:
+            # Read Research Agent results from shared memory
+            research_results = self.shared_memory.read(session_id, "research_result")
+            if research_results:
+                logger.info("Retrieved Research Agent results from shared memory", session_id=session_id)
+                query_from_research = research_results.get("query", query)
+                research_context = research_results  # Use full research context
+            else:
+                logger.warning("No Research Agent results in shared memory, using provided query", session_id=session_id)
+                query_from_research = query
             if self.agent and STRANDS_AVAILABLE:
                 try:
                     # Use Strands agent for data collection
-                    result = await self._execute_strands_data_collection(query, session_id, research_context)
+                    result = await self._execute_strands_data_collection(query_from_research, session_id, research_context)
                 except Exception as strands_error:
                     logger.warning(f"Strands agent failed, falling back to direct tools: {str(strands_error)}")
                     # Fallback to direct tool execution if Strands fails
-                    result = await self._execute_direct_data_collection(query, session_id, research_context)
+                    result = await self._execute_direct_data_collection(query_from_research, session_id, research_context)
             else:
                 # Fallback to direct tool execution
-                result = await self._execute_direct_data_collection(query, session_id, research_context)
+                result = await self._execute_direct_data_collection(query_from_research, session_id, research_context)
             
             # Store results in shared memory
             self.shared_memory.update_context(session_id, {
@@ -151,7 +160,7 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
             logger.error("Data collection execution failed", error=error_msg, session_id=session_id)
             
             error_result = {
-                "query": query,
+                "query": query_from_research if 'query_from_research' in locals() else query,
                 "error": error_msg,
                 "status": "failed",
                 "timestamp": datetime.now().isoformat()
@@ -241,16 +250,19 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
                         json.dumps(dataset),
                         sample_size=1000
                     )
-                    cleaning_data = json.loads(cleaning_result_str)
+                    cleaning_result = json.loads(cleaning_result_str)
                     
                     # Store in S3 with category information
                     from ..tools.data_tools import s3_storage_tool
                     storage_result_str = s3_storage_tool(
                         json.dumps(dataset),
-                        json.dumps(cleaning_data),
+                        json.dumps(cleaning_result),  # Pass full cleaning result with DataFrame
                         query=query  # Pass query for categorization
                     )
                     storage_data = json.loads(storage_result_str)
+                    
+                    # Extract metadata for compatibility
+                    cleaning_data = cleaning_result.get("metadata", cleaning_result)
                     
                     # Combine results
                     processed_dataset = {
@@ -303,14 +315,17 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
                         from ..tools.data_tools import data_cleaning_tool, s3_storage_tool
                         
                         cleaning_result_str = data_cleaning_tool(json.dumps(dataset), sample_size=1000)
-                        cleaning_data = json.loads(cleaning_result_str)
+                        cleaning_result = json.loads(cleaning_result_str)
                         
                         storage_result_str = s3_storage_tool(
                             json.dumps(dataset),
-                            json.dumps(cleaning_data),
+                            json.dumps(cleaning_result),  # Pass full cleaning result
                             query=query
                         )
                         storage_data = json.loads(storage_result_str)
+                        
+                        # Extract metadata for compatibility
+                        cleaning_data = cleaning_result.get("metadata", cleaning_result)
                         
                         processed_dataset = {
                             "original_dataset": dataset,
@@ -428,15 +443,18 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
                     
                     # Clean the dataset
                     cleaning_results = data_cleaning_tool(json.dumps(dataset), sample_size=1000)
-                    cleaning_data = json.loads(cleaning_results)
+                    cleaning_result = json.loads(cleaning_results)
                     
                     # Store in S3 with category information
                     storage_results = s3_storage_tool(
                         json.dumps(dataset), 
-                        json.dumps(cleaning_data),
+                        json.dumps(cleaning_result),  # Pass full cleaning result
                         query=query  # Pass query for categorization
                     )
                     storage_data = json.loads(storage_results)
+                    
+                    # Extract metadata for compatibility
+                    cleaning_data = cleaning_result.get("metadata", cleaning_result)
                     
                     # Combine results
                     processed_dataset = {
@@ -476,14 +494,17 @@ The smart_dataset_discovery_tool is your primary tool - use it first for most qu
                     all_datasets_found.append(dataset)  # Track found dataset
                     try:
                         cleaning_results = data_cleaning_tool(json.dumps(dataset), sample_size=1000)
-                        cleaning_data = json.loads(cleaning_results)
+                        cleaning_result = json.loads(cleaning_results)
                         
                         storage_results = s3_storage_tool(
                             json.dumps(dataset), 
-                            json.dumps(cleaning_data),
+                            json.dumps(cleaning_result),  # Pass full cleaning result
                             query=query
                         )
                         storage_data = json.loads(storage_results)
+                        
+                        # Extract metadata for compatibility
+                        cleaning_data = cleaning_result.get("metadata", cleaning_result)
                         
                         processed_dataset = {
                             "original_dataset": dataset,
